@@ -1,19 +1,17 @@
-from fastapi import FastAPI, HTTPException, Depends
+import streamlit as st
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Literal
 import cohere
 import os
 import random
 import json
-from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 import csv
 from io import StringIO
-from fastapi.responses import StreamingResponse
-from contextlib import asynccontextmanager
 from gtts import gTTS
 from io import BytesIO
+from pathlib import Path
 
 # Load environment variables
 env_path = Path('.') / 'variables.env'
@@ -32,8 +30,6 @@ class Account(BaseModel):
     pain_points: List[str] = Field(..., min_items=1, max_items=5)
     contacts: List[Contact] = Field(..., min_items=1)
     campaign_objective: Literal["awareness", "nurturing", "upselling"]
-
-    # New fields for interest, tone, and language
     interest: str = Field(..., min_length=1, max_length=100)
     tone: Literal["formal", "casual", "enthusiastic", "neutral"] = "neutral"
     language: str = Field(..., min_length=1, max_length=200)
@@ -43,7 +39,7 @@ class EmailVariant(BaseModel):
     body: str
     call_to_action: str
     sub_variants: List[str] = []
-    suggested_send_time: str    # List of alternative subject ideas
+    suggested_send_time: str  # List of alternative subject ideas
 
 class Email(BaseModel):
     variants: List[EmailVariant]
@@ -56,33 +52,16 @@ class CampaignRequest(BaseModel):
     accounts: List[Account] = Field(..., min_items=1, max_items=10)
     number_of_emails: int = Field(..., gt=0, le=10)
 
-class CampaignResponse(BaseModel):
-    campaigns: List[Campaign]
-
-# Application lifecycle management
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    if not os.getenv("COHERE_API_KEY"):
-        raise ValueError("COHERE_API_KEY environment variable is not set")
-    yield
-
-app = FastAPI(
-    title="Email Drip Campaign API by Error Pointers",
-    description="Generate personalized email campaigns ",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
 # Dependency for Cohere client
 def get_cohere_client():
     api_key = os.getenv("COHERE_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="COHERE_API key not found")
+        raise ValueError("COHERE_API_KEY environment variable is not set")
     return cohere.Client(api_key)
 
 def generate_email_content(client: cohere.Client, account: Account, email_number: int, total_emails: int, tone: str) -> List[EmailVariant]:
     if tone not in ["formal", "casual", "enthusiastic", "neutral"]:
-        raise HTTPException(status_code=400, detail="Invalid tone provided. Must be one of: formal, casual, enthusiastic, neutral.")
+        raise ValueError("Invalid tone provided. Must be one of: formal, casual, enthusiastic, neutral.")
 
     prompt = f"""
     Create a personalized email for the following business account:
@@ -117,25 +96,23 @@ def generate_email_content(client: cohere.Client, account: Account, email_number
     try:
         email_data = json.loads(response_text)
     except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Invalid JSON response from Cohere")
+        raise ValueError("Invalid JSON response from Cohere")
 
     sub_variants = email_data.get("subject", [])
     salutation = f"Best regards,The {account.account_name} Team"
 
-    # Define recommended send time based on industry or general rules
     send_times = {
         "morning": "8 AM - 10 AM",
         "afternoon": "1 PM - 3 PM",
         "evening": "6 PM - 8 PM",
     }
 
-    # Example rules: Adjust based on account's industry or type of campaign
     if account.industry.lower() in ["technology", "software"]:
-        recommended_send_time = send_times["morning"]  # Morning works well for tech emails
+        recommended_send_time = send_times["morning"]
     elif account.industry.lower() in ["retail", "e-commerce"]:
-        recommended_send_time = send_times["afternoon"]  # Afternoon may work best for retail
+        recommended_send_time = send_times["afternoon"]
     else:
-        recommended_send_time = send_times["evening"]  # Evening is generally safe for other industries
+        recommended_send_time = send_times["evening"]
 
     return [
         EmailVariant(
@@ -143,14 +120,14 @@ def generate_email_content(client: cohere.Client, account: Account, email_number
             body=email_data["body"].replace("\n", ""),
             call_to_action=email_data["call_to_action"].replace("\n", "") + salutation.replace("\n", ""),
             sub_variants=sub_variants,
-            suggested_send_time=recommended_send_time  # Add suggested send time
+            suggested_send_time=recommended_send_time
         )
     ]
 
 def generate_campaign(client: cohere.Client, account: Account, number_of_emails: int) -> Campaign:
     emails = []
     for contact in account.contacts:
-        contact.group = random.choice(["A", "B"])  # Assign random group for A/B testing
+        contact.group = random.choice(["A", "B"])
 
     for i in range(number_of_emails):
         tone = account.tone if account.tone else "neutral"
@@ -159,80 +136,88 @@ def generate_campaign(client: cohere.Client, account: Account, number_of_emails:
 
     return Campaign(account_name=account.account_name, emails=emails)
 
-@app.post(
-    "/generate-campaigns/",
-    response_model=CampaignResponse,
-    summary="Generate email campaigns",
-    response_description="Generated email campaigns for the provided accounts"
-)
-def generate_campaigns(
-    request: CampaignRequest,
-    client: cohere.Client = Depends(get_cohere_client)
-) -> CampaignResponse:
-    try:
-        campaigns = [
-            generate_campaign(client, account, request.number_of_emails)
-            for account in request.accounts
-        ]
-        return CampaignResponse(campaigns=campaigns)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+# Streamlit UI
 
-@app.post(
-    "/export-campaigns-csv/",
-    summary="Export campaigns as CSV",
-    response_description="CSV file containing all generated campaigns"
-)
-def export_campaigns_csv(
-    request: CampaignRequest,
-    client: cohere.Client = Depends(get_cohere_client)
-):
-    campaigns_response = generate_campaigns(request, client)
+st.title("Email Drip Campaign Generator")
 
-    output = StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['Account Name', 'Email Number', 'Variant', 'Subject', 'Sub-Variants', 'Body', 'Call to Action', 'Recommended Send Time'])
+api_key = os.getenv("COHERE_API_KEY")
+if not api_key:
+    st.error("COHERE_API_KEY environment variable is not set.")
+else:
+    # Form to input account details
+    with st.form(key='account_form'):
+        account_name = st.text_input("Account Name")
+        industry = st.text_input("Industry")
+        pain_points = st.text_area("Pain Points (comma separated)").split(",")
+        contacts = []
+        num_contacts = st.number_input("Number of Contacts", min_value=1, max_value=5)
+        for i in range(num_contacts):
+            name = st.text_input(f"Contact {i+1} Name")
+            email = st.text_input(f"Contact {i+1} Email")
+            job_title = st.text_input(f"Contact {i+1} Job Title")
+            contacts.append(Contact(name=name, email=email, job_title=job_title))
+        
+        campaign_objective = st.selectbox("Campaign Objective", ["awareness", "nurturing", "upselling"])
+        interest = st.text_input("Interest")
+        tone = st.selectbox("Tone", ["formal", "casual", "enthusiastic", "neutral"])
+        language = st.text_input("Language")
 
-    for campaign in campaigns_response.campaigns:
-        for email_idx, email in enumerate(campaign.emails, 1):
-            for variant_idx, variant in enumerate(email.variants, 1):
-                writer.writerow([
-                    campaign.account_name,
-                    f"Email {email_idx}",
-                    f"Variant {variant_idx}",
-                    variant.subject,
-                    "; ".join(variant.sub_variants),
-                    variant.body,
-                    variant.call_to_action,
-                    variant.suggested_send_time  # Use the correct attribute
-                ])
+        num_emails = st.number_input("Number of Emails", min_value=1, max_value=10)
 
-    output.seek(0)
-    filename = f"campaigns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+        submit_button = st.form_submit_button("Generate Campaign")
+    
+    if submit_button:
+        if api_key:
+            client = get_cohere_client()
+            account = Account(
+                account_name=account_name,
+                industry=industry,
+                pain_points=pain_points,
+                contacts=contacts,
+                campaign_objective=campaign_objective,
+                interest=interest,
+                tone=tone,
+                language=language
+            )
 
+            try:
+                campaign = generate_campaign(client, account, num_emails)
+                st.success("Campaign generated successfully!")
 
-def generate_tts_from_email(email_body: str, language: str = "en",speed: float = 1.5) -> StreamingResponse:
-    try:
-        email_body = email_body.replace("\n", "")
-        tts = gTTS(text=email_body, lang=language, slow=False)
-        audio_file = BytesIO()
-        tts.write_to_fp(audio_file)  # Use `write_to_fp` for BytesIO
-        audio_file.seek(0)
+                # Display generated emails
+                for email in campaign.emails:
+                    for variant in email.variants:
+                        st.write(f"Subject: {variant.subject}")
+                        st.write(f"Body: {variant.body}")
+                        st.write(f"Call to Action: {variant.call_to_action}")
+                        st.write(f"Suggested Send Time: {variant.suggested_send_time}")
+    
+    # Export campaign to CSV
+    export_button = st.button("Export Campaign as CSV")
+    if export_button:
+        # Prepare CSV
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Account Name', 'Email Number', 'Variant', 'Subject', 'Sub-Variants', 'Body', 'Call to Action', 'Recommended Send Time'])
 
-        return StreamingResponse(
-            audio_file,
-            media_type="audio/mpeg",
-            headers={"Content-Disposition": "attachment; filename=email_audio.mp3"}
+        for email in campaign.emails:
+            for variant in email.variants:
+                writer.writerow([campaign.account_name, f"Email {i + 1}", f"Variant {j + 1}", variant.subject, "; ".join(variant.sub_variants), variant.body, variant.call_to_action, variant.suggested_send_time])
+
+        output.seek(0)
+        st.download_button(
+            label="Download CSV",
+            data=output.getvalue(),
+            file_name=f"campaign_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
 
-@app.post("/generate-email-audio/")
-def generate_email_audio(email_body: str, language: str = "en"):
-    return generate_tts_from_email(email_body=email_body, language=language)
-
+    # TTS generation
+    tts_button = st.button("Generate Text to Speech for Email")
+    if tts_button:
+        email_body = "This is a test body text for TTS."  # Replace with email body of choice
+        tts = gTTS(email_body)
+        audio = BytesIO()
+        tts.save(audio)
+        audio.seek(0)
+        st.audio(audio)
