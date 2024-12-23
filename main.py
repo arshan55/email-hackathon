@@ -235,6 +235,4 @@ def generate_tts_from_email(email_body: str, language: str = "en",speed: float =
 @app.post("/generate-email-audio/")
 def generate_email_audio(email_body: str, language: str = "en"):
     return generate_tts_from_email(email_body=email_body, language=language)
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+
